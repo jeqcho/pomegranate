@@ -23,11 +23,20 @@ inf = float("inf")
 
 EPS = 1e-14
 
+
+def choice(num_choices: int, weights: torch.Tensor, batch_size: int) -> torch.Tensor:
+    "Wrapper to get a torch version of np.random.choice"
+    assert weights.shape == (batch_size, num_choices)
+    indices = weights.multinomial(num_samples=1, replacement=False)
+    return indices
+
+
 def check_for_zeros(tensor, name="tensor"):
     if torch.isnan(tensor).any():
         print(f"[WARNING] NaNs found in {name}")
     if torch.isinf(tensor).any():
         print(f"[WARNING] Infs found in {name}")
+
 
 def check_for_nans_infs(tensor, name="tensor"):
     if tensor is None:
@@ -36,6 +45,7 @@ def check_for_nans_infs(tensor, name="tensor"):
         print(f"[WARNING] NaNs found in {name}")
     if torch.isinf(tensor).any():
         print(f"[WARNING] Infs found in {name}")
+
 
 class DenseHMM(_BaseHMM):
     """A hidden Markov model with a dense transition matrix.
@@ -51,10 +61,10 @@ class DenseHMM(_BaseHMM):
     This object is a wrapper for both implementations, which can be specified
     using the `kind` parameter. Choosing the right implementation will not
     effect the accuracy of the results but will change the speed at which they
-    are calculated. 	
+    are calculated.
 
     Separately, there are two ways to instantiate the hidden Markov model. The
-    first is by passing in a set of distributions, a dense transition matrix, 
+    first is by passing in a set of distributions, a dense transition matrix,
     and optionally start/end probabilities. The second is to initialize the
     object without these and then to add edges using the `add_edge` method
     and to add distributions using the `add_distributions` method. Importantly, the way that
@@ -68,7 +78,7 @@ class DenseHMM(_BaseHMM):
     ----------
     distributions: tuple or list
         A set of distribution objects. These objects do not need to be
-        initialized, i.e., can be "Normal()". 
+        initialized, i.e., can be "Normal()".
 
     edges: numpy.ndarray, torch.Tensor, or None. shape=(k,k), optional
         A dense transition matrix of probabilities for how each node or
@@ -104,32 +114,67 @@ class DenseHMM(_BaseHMM):
         Setting this to False is also necessary for compiling. Default is True.
     """
 
-    def __init__(self, distributions=None, edges=None, starts=None, ends=None, 
-        init='random', max_iter=1000, tol=0.1, sample_length=None, 
-        return_sample_paths=False, inertia=0.0, frozen=False, check_data=True,
-        random_state=None, verbose=False):
-        super().__init__(distributions=distributions, starts=starts, ends=ends, 
-            init=init, max_iter=max_iter, tol=tol, sample_length=sample_length, 
-            return_sample_paths=return_sample_paths, inertia=inertia,
-            frozen=frozen, check_data=check_data, random_state=random_state, 
-            verbose=verbose)
-        
+    def __init__(
+        self,
+        distributions=None,
+        edges=None,
+        starts=None,
+        ends=None,
+        init="random",
+        max_iter=1000,
+        tol=0.1,
+        sample_length=None,
+        return_sample_paths=False,
+        inertia=0.0,
+        frozen=False,
+        check_data=True,
+        random_state=None,
+        verbose=False,
+    ):
+        super().__init__(
+            distributions=distributions,
+            starts=starts,
+            ends=ends,
+            init=init,
+            max_iter=max_iter,
+            tol=tol,
+            sample_length=sample_length,
+            return_sample_paths=return_sample_paths,
+            inertia=inertia,
+            frozen=frozen,
+            check_data=check_data,
+            random_state=random_state,
+            verbose=verbose,
+        )
+
         self.name = "DenseHMM"
+        self.sample_ready = False
         n = len(distributions) if distributions is not None else 0
 
         if edges is not None:
-            self.edges = _cast_as_parameter(torch.log(_check_parameter(
-                _cast_as_tensor(edges), "edges", ndim=2, shape=(n, n), 
-                min_value=0., max_value=1.)))
+            self.edges = _cast_as_parameter(
+                torch.log(
+                    _check_parameter(
+                        _cast_as_tensor(edges),
+                        "edges",
+                        ndim=2,
+                        shape=(n, n),
+                        min_value=0.0,
+                        max_value=1.0,
+                    )
+                )
+            )
 
-        self._initialized = (self.distributions is not None and
-            self.starts is not None and self.ends is not None and
-            self.edges is not None and 
-            all(d._initialized for d in self.distributions))
+        self._initialized = (
+            self.distributions is not None
+            and self.starts is not None
+            and self.ends is not None
+            and self.edges is not None
+            and all(d._initialized for d in self.distributions)
+        )
 
         if self._initialized:
-            self.distributions = torch.nn.ModuleList(
-                self.distributions)
+            self.distributions = torch.nn.ModuleList(self.distributions)
 
         self._reset_cache()
 
@@ -148,15 +193,36 @@ class DenseHMM(_BaseHMM):
         for node in self.distributions:
             node._reset_cache()
 
-        self.register_buffer("_xw_sum", torch.zeros(self.n_distributions, 
-            self.n_distributions, dtype=self.dtype, requires_grad=False, 
-            device=self.device))
+        self.register_buffer(
+            "_xw_sum",
+            torch.zeros(
+                self.n_distributions,
+                self.n_distributions,
+                dtype=self.dtype,
+                requires_grad=False,
+                device=self.device,
+            ),
+        )
 
-        self.register_buffer("_xw_starts_sum", torch.zeros(self.n_distributions, 
-            dtype=self.dtype, requires_grad=False, device=self.device))
+        self.register_buffer(
+            "_xw_starts_sum",
+            torch.zeros(
+                self.n_distributions,
+                dtype=self.dtype,
+                requires_grad=False,
+                device=self.device,
+            ),
+        )
 
-        self.register_buffer("_xw_ends_sum", torch.zeros(self.n_distributions, 
-            dtype=self.dtype, requires_grad=False, device=self.device))
+        self.register_buffer(
+            "_xw_ends_sum",
+            torch.zeros(
+                self.n_distributions,
+                dtype=self.dtype,
+                requires_grad=False,
+                device=self.device,
+            ),
+        )
 
     def _initialize(self, X=None, sample_weight=None):
         """Initialize the probability distribution.
@@ -181,8 +247,9 @@ class DenseHMM(_BaseHMM):
 
         n = self.n_distributions
         if self.edges == None:
-            self.edges = _cast_as_parameter(torch.log(torch.ones(n, n, 
-                dtype=self.dtype, device=self.device) / n))
+            self.edges = _cast_as_parameter(
+                torch.log(torch.ones(n, n, dtype=self.dtype, device=self.device) / n)
+            )
 
         self.distributions = torch.nn.ModuleList(self.distributions)
 
@@ -216,24 +283,27 @@ class DenseHMM(_BaseHMM):
 
         if start == self.start:
             if self.starts is None:
-                self.starts = torch.full((n,), NEGINF, dtype=self.dtype,
-                    device=self.device)
+                self.starts = torch.full(
+                    (n,), NEGINF, dtype=self.dtype, device=self.device
+                )
 
             idx = self.distributions.index(end)
             self.starts[idx] = math.log(prob)
 
         elif end == self.end:
             if self.ends is None:
-                self.ends = torch.full((n,), NEGINF, dtype=self.dtype,
-                    device=self.device)
+                self.ends = torch.full(
+                    (n,), NEGINF, dtype=self.dtype, device=self.device
+                )
 
             idx = self.distributions.index(start)
             self.ends[idx] = math.log(prob)
 
         else:
             if self.edges is None:
-                self.edges = torch.full((n, n), NEGINF, dtype=self.dtype,
-                    device=self.device)
+                self.edges = torch.full(
+                    (n, n), NEGINF, dtype=self.dtype, device=self.device
+                )
 
             idx1 = self.distributions.index(start)
             idx2 = self.distributions.index(end)
@@ -253,7 +323,7 @@ class DenseHMM(_BaseHMM):
         ----------
         n: int
             The number of samples to generate.
-        
+
 
         Returns
         -------
@@ -263,12 +333,17 @@ class DenseHMM(_BaseHMM):
         """
 
         if self.sample_length is None and self.ends is None:
-            raise ValueError("Must specify a length or have explicit "
-                + "end probabilities.")
+            raise ValueError(
+                "Must specify a length or have explicit " + "end probabilities."
+            )
 
         if self.ends is None:
-            ends = torch.full((self.n_distributions,), NEGINF, dtype=self.edges.dtype,
-                device=self.edges.device)
+            ends = torch.full(
+                (self.n_distributions,),
+                NEGINF,
+                dtype=self.edges.dtype,
+                device=self.edges.device,
+            )
         else:
             ends = self.ends
 
@@ -280,13 +355,14 @@ class DenseHMM(_BaseHMM):
         starts = torch.exp(self.starts).numpy()
 
         for _ in tqdm(range(n)):
-            node_i = self.random_state.choice(self.n_distributions, p=starts)
+            node_i = self.random_state.choice(self.n_distributions, starts)
             emission_i = self.distributions[node_i].sample(n=1)
             distributions_, emissions_ = [node_i], [emission_i]
 
             for i in range(1, self.sample_length or int(1e8)):
-                node_i = self.random_state.choice(self.n_distributions+1, 
-                    p=edge_probs[node_i])
+                node_i = self.random_state.choice(
+                    self.n_distributions + 1, edge_probs[node_i]
+                )
 
                 if node_i == self.n_distributions:
                     break
@@ -301,10 +377,83 @@ class DenseHMM(_BaseHMM):
 
         return emissions
 
+    def init_batched_sample(self) -> None:
+        """Prepare DenseHMM for batched_sample by setting self.emission_probs.
+        Call this after every training, before a sampling session.
+        """
+        self.emission_probs = None
+        for dist in self.distributions:
+            if self.emission_probs is None:
+                self.emission_probs = dist.probs
+            else:
+                self.emission_probs = torch.concat([self.emission_probs, dist.probs])
+
+    def batched_sample(self, n) -> torch.Tensor:
+        """Same as self.sample() but uses GPU to all n in one batch.
+        n should not be too large.
+
+
+        Parameters
+        ----------
+        n: int
+            The number of samples to generate.
+
+
+        Returns
+        -------
+        X: list of torch.tensor, shape=(n,)
+            A list of randomly generated samples, where each sample of
+            size (length, self.d).
+        """
+
+        if not hasattr(self, "sample_ready") or not self.sample_ready:
+            # hasattr is for backward compatibility for DenseHMMs that don't have self.sample_ready
+            self.init_batched_sample()
+
+        assert isinstance(self.emission_probs, torch.Tensor)
+
+        if self.sample_length is None and self.ends is None:
+            raise ValueError(
+                "Must specify a length or have explicit " + "end probabilities."
+            )
+
+        if self.ends is None:
+            ends = torch.full(
+                (self.n_distributions,),
+                NEGINF,
+                dtype=self.edges.dtype,
+                device=self.edges.device,
+            )
+        else:
+            ends = self.ends
+
+
+        edge_probs = torch.hstack([self.edges, ends.unsqueeze(1)])
+        edge_probs = torch.exp(edge_probs)
+
+        starts = torch.exp(self.starts)
+
+        node_i = starts.multinomial(num_samples=n, replacement=True)
+        emission_i = self.emission_probs[node_i].multinomial(num_samples=1)
+        emissions_ = emission_i.reshape(1,-1)
+
+        for i in range(1, self.sample_length or int(1e8)):
+            node_i = choice(
+                num_choices=self.n_distributions + 1,
+                weights=edge_probs[node_i],
+                batch_size=n,
+            )
+
+            emission_i = self.emission_probs[node_i].multinomial(num_samples=1)
+
+            emissions_ = torch.concat([emissions_, emission_i.reshape(1,-1)])
+
+        return emissions_
+
     def viterbi(self, X=None, emissions=None, priors=None):
         """Run the Viterbi algorithm on some data.
 
-        Runs the Viterbi algortihm on a batch of sequences. The Viterbi 
+        Runs the Viterbi algortihm on a batch of sequences. The Viterbi
         algorithm is a dynamic programming algorithm that begins at the start
         state and calculates the single best path through the model involving
         alignments of symbol i to node j. This is in contrast to the forward
@@ -318,11 +467,11 @@ class DenseHMM(_BaseHMM):
         ----------
         X: list, numpy.ndarray, torch.Tensor, shape=(-1, -1, d)
             A set of examples to evaluate. Does not need to be passed in if
-            emissions are. 
+            emissions are.
 
         emissions: list, numpy.ndarray, torch.Tensor, shape=(-1, -1, n_dists)
             Precalculated emission log probabilities. These are the
-            probabilities of each observation under each probability 
+            probabilities of each observation under each probability
             distribution. When running some algorithms it is more efficient
             to precalculate these and pass them into each call.
 
@@ -342,19 +491,19 @@ class DenseHMM(_BaseHMM):
         -------
         path: torch.Tensor, shape=(-1, -1)
             The state assignment for each observation in each sequence.
-        """ 
+        """
 
         emissions = _check_inputs(self, X, emissions, priors)
         n, l = emissions.shape[:2]
 
         v = torch.clone(emissions.permute(1, 0, 2)).contiguous()
         v[0] += self.starts
-        
+
         traceback = torch.zeros_like(v, dtype=torch.int32)
         traceback[0] = torch.arange(v.shape[-1])
 
         for i in range(1, l):
-            z = v[i-1].unsqueeze(-1) + self.edges.unsqueeze(0) + v[i][:, None]
+            z = v[i - 1].unsqueeze(-1) + self.edges.unsqueeze(0) + v[i][:, None]
             v[i], traceback[i] = torch.max(z, dim=-2)
 
         ends = self.ends + v[-1]
@@ -362,11 +511,10 @@ class DenseHMM(_BaseHMM):
 
         paths = [best_end_idxs]
         for i in range(1, l):
-            paths.append(traceback[l-i, torch.arange(n), paths[-1]])
+            paths.append(traceback[l - i, torch.arange(n), paths[-1]])
 
         paths = torch.flip(torch.stack(paths).T, dims=(-1,))
         return paths
-
 
     def forward(self, X=None, emissions=None, priors=None):
         """Run the forward algorithm on some data.
@@ -377,16 +525,16 @@ class DenseHMM(_BaseHMM):
         start state and returns the probability, over all paths through the
         model, that result in the alignment of symbol i to node j.
 
-        
+
         Parameters
         ----------
         X: list, numpy.ndarray, torch.Tensor, shape=(-1, -1, d)
             A set of examples to evaluate. Does not need to be passed in if
-            emissions are. 
+            emissions are.
 
         emissions: list, numpy.ndarray, torch.Tensor, shape=(-1, -1, n_dists)
             Precalculated emission log probabilities. These are the
-            probabilities of each observation under each probability 
+            probabilities of each observation under each probability
             distribution. When running some algorithms it is more efficient
             to precalculate these and pass them into each call.
 
@@ -407,34 +555,36 @@ class DenseHMM(_BaseHMM):
         f: torch.Tensor, shape=(-1, -1, self.n_distributions)
             The log probabilities calculated by the forward algorithm.
         """
-        check_for_nans_infs(emissions,"emissions (forward before check)")
+        check_for_nans_infs(emissions, "emissions (forward before check)")
         emissions = _check_inputs(self, X, emissions, priors)
-        check_for_nans_infs(emissions,"emissions (forward after check)")
+        check_for_nans_infs(emissions, "emissions (forward after check)")
         l = emissions.shape[1]
 
         t_max = self.edges.max()
         t = torch.exp(self.edges - t_max)
         f = torch.clone(emissions.permute(1, 0, 2)).contiguous()
-        check_for_nans_infs(t,"t (forward early)")
-        check_for_nans_infs(emissions,"emissions (forward early)")
-        check_for_nans_infs(f,"f (forward early)")
-        check_for_nans_infs(self.starts,"self.starts (forward)")
-        check_for_nans_infs(t_max,"t_max (forward)")
+        check_for_nans_infs(t, "t (forward early)")
+        check_for_nans_infs(emissions, "emissions (forward early)")
+        check_for_nans_infs(f, "f (forward early)")
+        check_for_nans_infs(self.starts, "self.starts (forward)")
+        check_for_nans_infs(t_max, "t_max (forward)")
         f[0] += self.starts
         f[1:] += t_max
 
         for i in range(1, l):
-            check_for_nans_infs(f[i],"f[i] (forward before)")
-            p_max = torch.max(f[i-1], dim=1, keepdims=True).values
-            p = torch.exp(f[i-1] - p_max)
-            check_for_nans_infs(p_max,"p_max (forward)")
-            check_for_nans_infs(p,"p (forward)")
-            check_for_nans_infs(torch.log(torch.matmul(p, t) + EPS) + p_max,"exp (forward)")
-            f[i] += torch.log(torch.matmul(p, t) +EPS) + p_max
-            check_for_nans_infs(f[i],"f[i] (forward)")
+            check_for_nans_infs(f[i], "f[i] (forward before)")
+            p_max = torch.max(f[i - 1], dim=1, keepdims=True).values
+            p = torch.exp(f[i - 1] - p_max)
+            check_for_nans_infs(p_max, "p_max (forward)")
+            check_for_nans_infs(p, "p (forward)")
+            check_for_nans_infs(
+                torch.log(torch.matmul(p, t) + EPS) + p_max, "exp (forward)"
+            )
+            f[i] += torch.log(torch.matmul(p, t) + EPS) + p_max
+            check_for_nans_infs(f[i], "f[i] (forward)")
 
         f = f.permute(1, 0, 2)
-        check_for_nans_infs(f,"f (forward)")
+        check_for_nans_infs(f, "f (forward)")
         return f
 
     def backward(self, X=None, emissions=None, priors=None):
@@ -447,16 +597,16 @@ class DenseHMM(_BaseHMM):
         model, that result in the alignment of symbol i to node j, working
         backwards.
 
-        
+
         Parameters
         ----------
         X: list, numpy.ndarray, torch.Tensor, shape=(-1, -1, d)
             A set of examples to evaluate. Does not need to be passed in if
-            emissions are. 
+            emissions are.
 
         emissions: list, numpy.ndarray, torch.Tensor, shape=(-1, -1, n_distributions)
             Precalculated emission log probabilities. These are the
-            probabilities of each observation under each probability 
+            probabilities of each observation under each probability
             distribution. When running some algorithms it is more efficient
             to precalculate these and pass them into each call.
 
@@ -481,15 +631,16 @@ class DenseHMM(_BaseHMM):
         emissions = _check_inputs(self, X, emissions, priors)
         n, l, _ = emissions.shape
 
-        b = torch.full((l, n, self.n_distributions), NEGINF, dtype=self.dtype,
-            device=self.device)
+        b = torch.full(
+            (l, n, self.n_distributions), NEGINF, dtype=self.dtype, device=self.device
+        )
         b[-1] = self.ends
 
         t_max = self.edges.max()
         t = torch.exp(self.edges.T - t_max)
 
-        for i in range(l-2, -1, -1):
-            p = b[i+1] + emissions[:, i+1]
+        for i in range(l - 2, -1, -1):
+            p = b[i + 1] + emissions[:, i + 1]
             p_max = torch.max(p, dim=1, keepdims=True).values
             p = torch.exp(p - p_max)
 
@@ -509,18 +660,18 @@ class DenseHMM(_BaseHMM):
 
         A number of statistics can be calculated using this information. These
         statistics are powerful inference tools but are also used during the
-        Baum-Welch training process. 
+        Baum-Welch training process.
 
-        
+
         Parameters
         ----------
         X: list, numpy.ndarray, torch.Tensor, shape=(-1, -1, d)
             A set of examples to evaluate. Does not need to be passed in if
-            emissions are. 
+            emissions are.
 
         emissions: list, numpy.ndarray, torch.Tensor, shape=(-1, -1, n_distributions)
             Precalculated emission log probabilities. These are the
-            probabilities of each observation under each probability 
+            probabilities of each observation under each probability
             distribution. When running some algorithms it is more efficient
             to precalculate these and pass them into each call.
 
@@ -552,7 +703,7 @@ class DenseHMM(_BaseHMM):
             until the end of the sequence.
 
         starts: torch.Tensor, shape=(-1, n)
-            The probabilities of starting at each node given the 
+            The probabilities of starting at each node given the
             forward-backward algorithm.
 
         ends: torch.Tensor, shape=(-1, n)
@@ -562,16 +713,16 @@ class DenseHMM(_BaseHMM):
         logp: torch.Tensor, shape=(-1,)
             The log probabilities of each sequence given the model.
         """
-        check_for_nans_infs(emissions,"emissions (forward_backward 1)")
+        check_for_nans_infs(emissions, "emissions (forward_backward 1)")
         emissions = _check_inputs(self, X, emissions, priors)
-        check_for_nans_infs(emissions,"emissions (forward_backward 2)")
+        check_for_nans_infs(emissions, "emissions (forward_backward 2)")
         n, l, _ = emissions.shape
 
-        check_for_nans_infs(emissions,"emissions (forward_backward 3)")
+        check_for_nans_infs(emissions, "emissions (forward_backward 3)")
         f = self.forward(emissions=emissions)
-        check_for_nans_infs(f,"f (forward_backward)")
+        check_for_nans_infs(f, "f (forward_backward)")
         b = self.backward(emissions=emissions)
-        check_for_nans_infs(b,"b (forward_backward)")
+        check_for_nans_infs(b, "b (forward_backward)")
 
         logp = torch.logsumexp(f[:, -1] + self.ends, dim=1)
 
@@ -579,7 +730,7 @@ class DenseHMM(_BaseHMM):
         b_ = (b[:, 1:] + emissions[:, 1:]).unsqueeze(-2)
 
         t = f_ + b_ + self.edges.unsqueeze(0).unsqueeze(0)
-        t = t.reshape(n, l-1, -1)
+        t = t.reshape(n, l - 1, -1)
         t = torch.exp(torch.logsumexp(t, dim=1).T - logp).T
         t = t.reshape(n, int(t.shape[1] ** 0.5), -1)
 
@@ -608,7 +759,7 @@ class DenseHMM(_BaseHMM):
         X: torch.Tensor, shape=(-1, -1, self.d)
             A set of examples to summarize.
 
-        y: torch.Tensor, shape=(-1, -1), optional 
+        y: torch.Tensor, shape=(-1, -1), optional
             A set of labels with the same number of examples and length as the
             observations that indicate which node in the model that each
             observation should be assigned to. Passing this in means that the
@@ -620,9 +771,9 @@ class DenseHMM(_BaseHMM):
 
         emissions: torch.Tensor, shape=(-1, -1, self.n_distributions)
             Precalculated emission log probabilities. These are the
-            probabilities of each observation under each probability 
+            probabilities of each observation under each probability
             distribution. When running some algorithms it is more efficient
-            to precalculate these and pass them into each call.	
+            to precalculate these and pass them into each call.
 
         priors: list, numpy.ndarray, torch.Tensor, shape=(-1, -1, self.k)
             Prior probabilities of assigning each symbol to each node. If not
@@ -635,9 +786,10 @@ class DenseHMM(_BaseHMM):
             influences the initial estimate of an observation being generated
             by a component, not gives a target. Default is None.
         """
-        X, emissions, sample_weight = super().summarize(X, 
-            sample_weight=sample_weight, emissions=emissions, priors=priors)
-        
+        X, emissions, sample_weight = super().summarize(
+            X, sample_weight=sample_weight, emissions=emissions, priors=priors
+        )
+
         t, r, starts, ends, logps = self.forward_backward(emissions=emissions)
 
         X = X.reshape(-1, X.shape[-1])
@@ -647,22 +799,26 @@ class DenseHMM(_BaseHMM):
             node.summarize(X, sample_weight=w)
 
         if self.frozen == False:
-            check_for_nans_infs(sample_weight,"sample_weight (summarize)")
-            check_for_nans_infs(self._xw_starts_sum,"self._xw_starts_sum (summarize before)")
-            check_for_nans_infs(self._xw_ends_sum,"self._xw_ends_sum (summarize before)")
-            check_for_nans_infs(self._xw_sum,"self._xw_sum (summarize before)")
-            
-            check_for_nans_infs(starts,"starts (summarize)")
-            check_for_nans_infs(ends,"ends (summarize)")
-            check_for_nans_infs(t,"t (summarize)")
-            
+            check_for_nans_infs(sample_weight, "sample_weight (summarize)")
+            check_for_nans_infs(
+                self._xw_starts_sum, "self._xw_starts_sum (summarize before)"
+            )
+            check_for_nans_infs(
+                self._xw_ends_sum, "self._xw_ends_sum (summarize before)"
+            )
+            check_for_nans_infs(self._xw_sum, "self._xw_sum (summarize before)")
+
+            check_for_nans_infs(starts, "starts (summarize)")
+            check_for_nans_infs(ends, "ends (summarize)")
+            check_for_nans_infs(t, "t (summarize)")
+
             self._xw_starts_sum += torch.sum(starts * sample_weight, dim=0)
             self._xw_ends_sum += torch.sum(ends * sample_weight, dim=0)
-            self._xw_sum += torch.sum(t * sample_weight.unsqueeze(-1), dim=0) 
-            
-            check_for_nans_infs(self._xw_starts_sum,"self._xw_starts_sum (summarize)")
-            check_for_nans_infs(self._xw_ends_sum,"self._xw_ends_sum (summarize)")
-            check_for_nans_infs(self._xw_sum,"self._xw_sum (summarize)")
+            self._xw_sum += torch.sum(t * sample_weight.unsqueeze(-1), dim=0)
+
+            check_for_nans_infs(self._xw_starts_sum, "self._xw_starts_sum (summarize)")
+            check_for_nans_infs(self._xw_ends_sum, "self._xw_ends_sum (summarize)")
+            check_for_nans_infs(self._xw_sum, "self._xw_sum (summarize)")
 
         return logps
 
@@ -685,20 +841,24 @@ class DenseHMM(_BaseHMM):
 
         node_out_count = torch.sum(self._xw_sum, dim=1, keepdims=True)
         node_out_count += self._xw_ends_sum.unsqueeze(1)
-        
-        check_for_nans_infs(node_out_count,"node_out_count")
-        check_for_nans_infs(self._xw_starts_sum,"self._xw_starts_sum")
-        check_for_nans_infs(self._xw_sum,"self._xw_sum")
 
-        ends = torch.log((self._xw_ends_sum + EPS) / (node_out_count[:,0]+EPS))
-        starts = torch.log((self._xw_starts_sum+EPS) / (self._xw_starts_sum.sum()+EPS))
-        edges = torch.log((self._xw_sum+EPS) / (node_out_count+EPS))
-  
-        check_for_nans_infs(ends,"ends")
-        check_for_nans_infs(starts,"starts")
-        check_for_nans_infs(edges,"edges")
+        check_for_nans_infs(node_out_count, "node_out_count")
+        check_for_nans_infs(self._xw_starts_sum, "self._xw_starts_sum")
+        check_for_nans_infs(self._xw_sum, "self._xw_sum")
+
+        ends = torch.log((self._xw_ends_sum + EPS) / (node_out_count[:, 0] + EPS))
+        starts = torch.log(
+            (self._xw_starts_sum + EPS) / (self._xw_starts_sum.sum() + EPS)
+        )
+        edges = torch.log((self._xw_sum + EPS) / (node_out_count + EPS))
+
+        check_for_nans_infs(ends, "ends")
+        check_for_nans_infs(starts, "starts")
+        check_for_nans_infs(edges, "edges")
 
         _update_parameter(self.ends, ends, inertia=self.inertia)
         _update_parameter(self.starts, starts, inertia=self.inertia)
         _update_parameter(self.edges, edges, inertia=self.inertia)
         self._reset_cache()
+
+        self.sample_ready = False
