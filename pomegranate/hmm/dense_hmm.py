@@ -15,8 +15,6 @@ from ..distributions._distribution import Distribution
 from ._base import _BaseHMM
 from ._base import _check_inputs
 
-from tqdm import tqdm
-
 
 NEGINF = float("-inf")
 inf = float("inf")
@@ -354,7 +352,7 @@ class DenseHMM(_BaseHMM):
 
         starts = torch.exp(self.starts).numpy()
 
-        for _ in tqdm(range(n)):
+        for _ in range(n):
             node_i = self.random_state.choice(self.n_distributions, starts)
             emission_i = self.distributions[node_i].sample(n=1)
             distributions_, emissions_ = [node_i], [emission_i]
@@ -377,18 +375,20 @@ class DenseHMM(_BaseHMM):
 
         return emissions
 
-    def init_batched_sample(self) -> None:
+    def init_batched_sample(self, seq_len: int) -> None:
         """Prepare DenseHMM for batched_sample by setting self.emission_probs.
         Call this after every training, before a sampling session.
         """
         self.emission_probs = None
         for dist in self.distributions:
             if self.emission_probs is None:
-                self.emission_probs = dist.probs
+                self.emission_probs = dist.probs.detach().clone()
             else:
-                self.emission_probs = torch.concat([self.emission_probs, dist.probs])
+                self.emission_probs = torch.concat(
+                    [self.emission_probs, dist.probs.detach().clone()]
+                )
 
-    def batched_sample(self, n) -> torch.Tensor:
+    def batched_sample(self, batch_size: int, seq_len: int) -> torch.Tensor:
         """Same as self.sample() but uses GPU to all n in one batch.
         n should not be too large.
 
@@ -408,7 +408,7 @@ class DenseHMM(_BaseHMM):
 
         if not hasattr(self, "sample_ready") or not self.sample_ready:
             # hasattr is for backward compatibility for DenseHMMs that don't have self.sample_ready
-            self.init_batched_sample()
+            self.init_batched_sample(seq_len)
 
         assert isinstance(self.emission_probs, torch.Tensor)
 
@@ -427,27 +427,38 @@ class DenseHMM(_BaseHMM):
         else:
             ends = self.ends
 
-
         edge_probs = torch.hstack([self.edges, ends.unsqueeze(1)])
         edge_probs = torch.exp(edge_probs)
 
         starts = torch.exp(self.starts)
+        assert starts.shape == (self.n_distributions,)
 
-        node_i = starts.multinomial(num_samples=n, replacement=True)
-        emission_i = self.emission_probs[node_i].multinomial(num_samples=1)
-        emissions_ = emission_i.reshape(1,-1)
+        node_i = starts.multinomial(num_samples=batch_size, replacement=True).flatten()
+        assert node_i.shape == (batch_size,)
 
-        for i in range(1, self.sample_length or int(1e8)):
-            node_i = choice(
-                num_choices=self.n_distributions + 1,
-                weights=edge_probs[node_i],
-                batch_size=n,
+        emissions_ = self.emission_probs[node_i].multinomial(num_samples=1)
+        assert emissions_.shape == (batch_size, 1)
+
+        for _ in range(1, seq_len):
+            node_i = (
+                edge_probs[node_i]
+                .multinomial(num_samples=1, replacement=True)
+                .flatten()
             )
+            assert node_i.shape == (batch_size,)
+
+            # terminal states gets a new start
+            if node_i.max() == self.n_distributions:
+                node_i[node_i == node_i.max()] = starts.multinomial(
+                    num_samples=1, replacement=True
+                ).flatten()
 
             emission_i = self.emission_probs[node_i].multinomial(num_samples=1)
+            assert emission_i.shape == (batch_size, 1)
 
-            emissions_ = torch.concat([emissions_, emission_i.reshape(1,-1)])
+            emissions_ = torch.concat([emissions_, emission_i], dim=1)
 
+        assert emissions_.shape == (batch_size, seq_len)
         return emissions_
 
     def viterbi(self, X=None, emissions=None, priors=None):
