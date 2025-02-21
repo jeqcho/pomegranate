@@ -177,7 +177,8 @@ class _BaseHMM(Distribution):
 
         if not isinstance(random_state, numpy.random.RandomState):
             self.random_state = numpy.random.RandomState(random_state)
-            torch.manual_seed(random_state)
+            if isinstance(random_state, int):
+                torch.manual_seed(random_state)
         else:
             self.random_state = random_state
 
